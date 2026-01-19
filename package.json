@@ -12,6 +12,10 @@
     "mineflayer-pathfinder": "^1.6.0",
     "prismarine-viewer": "^1.5.0",
     "socket.io": "^4.7.2",
-    "minecraft-data": "^2.2.0"
+    "minecraft-data": "^2.2.0",
+    "http-proxy-middleware": "^2.0.6"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
