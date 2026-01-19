@@ -476,11 +476,13 @@ app.get('/dashboard.html', (req, res) => {
   res.sendFile(__dirname + '/public/dashboard.html');
 });
 
-const PORT = 3000;
+// Replace the existing PORT constant (e.g. const PORT = 3000;)
+const PORT = process.env.PORT || 3000;
+
 server.listen(PORT, () => {
   console.log(`Web server listening on http://localhost:${PORT}`);
+  console.log(`Open / (bot maker) and /dashboard.html`);
 });
-
 // Optionally create an initial bot per original request
 createBot({ host: 'Stackables.aternos.me', port: 39639, username: `keeper_${Date.now()}` });
 
