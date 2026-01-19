@@ -1,0 +1,201 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Bot Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 12px; display:flex; gap:16px; }
+    #left { width: 720px; }
+    #right { width: 360px; }
+    iframe { width: 720px; height: 480px; border:1px solid #ccc; }
+    .panel { border:1px solid #ddd; padding:8px; margin-bottom:8px; }
+    .controls button { padding:6px 10px; margin:4px; }
+    #chatLog { height: 180px; overflow:auto; background:#111; color:#0f0; padding:8px; font-family:monospace; }
+    #telemetry div { margin:4px 0; }
+  </style>
+</head>
+<body>
+  <div id="left">
+    <div class="panel">
+      <h3>Bot View</h3>
+      <!-- viewer iframe will be set dynamically based on the bot viewer port -->
+      <iframe id="viewer" src=""></iframe>
+      <p style="font-size:12px;color:#666">If viewer doesn't show, open the viewer URL directly.</p>
+    </div>
+
+    <div class="panel">
+      <h3>Controls</h3>
+      <div class="controls">
+        <button id="takeControl">Take Control</button>
+        <button id="releaseControl">Release Control</button>
+        <button id="dropBtn">Drop Inventory</button>
+      </div>
+      <div style="margin-top:8px;">
+        <label>Chat to server:
+          <input id="chatInput" style="width:60%" />
+          <button id="sendChat">Send</button>
+        </label>
+      </div>
+      <div style="margin-top:8px;">
+        <p>Manual control keys: W/A/S/D for movement, Space for jump, Shift to sneak. Click on the area below and use keys to control while you have taken control.</p>
+        <div id="controlArea" tabindex="0" style="height:120px;border:1px solid #ccc;outline:none; display:flex; align-items:center; justify-content:center;">
+          Click here and use WASD/Space/Shift to control
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="right">
+    <div class="panel" id="telemetry">
+      <h4>Telemetry</h4>
+      <div>Bot ID: <span id="botId">-</span></div>
+      <div>Connected: <span id="connected">no</span></div>
+      <div>Username: <span id="username">-</span></div>
+      <div>Position: <span id="position">-</span></div>
+      <div>Health: <span id="health">-</span></div>
+      <div>Food: <span id="food">-</span></div>
+      <div>Controlling Client: <span id="controller">-</span></div>
+      <div>Viewer Port: <span id="viewerPort">-</span></div>
+    </div>
+
+    <div class="panel">
+      <h4>Chat</h4>
+      <div id="chatLog"></div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const botId = params.get('botId');
+    if (!botId) {
+      document.body.innerHTML = '<p>No botId specified in URL. Open this page with ?botId=YOUR_BOT_ID from the Bot Maker page.</p>';
+      throw new Error('No botId');
+    }
+
+    document.getElementById('botId').textContent = botId;
+
+    const socket = io('/dashboard');
+
+    const connectedEl = document.getElementById('connected');
+    const usernameEl = document.getElementById('username');
+    const positionEl = document.getElementById('position');
+    const healthEl = document.getElementById('health');
+    const foodEl = document.getElementById('food');
+    const controllerEl = document.getElementById('controller');
+    const chatLog = document.getElementById('chatLog');
+    const viewerIframe = document.getElementById('viewer');
+
+    let hasControl = false;
+
+    socket.on('allStates', (states) => {
+      const s = states[botId];
+      if (!s) {
+        connectedEl.textContent = 'no';
+        usernameEl.textContent = '-';
+        positionEl.textContent = '-';
+        healthEl.textContent = '-';
+        foodEl.textContent = '-';
+        controllerEl.textContent = '-';
+        document.getElementById('viewerPort').textContent = '-';
+        chatLog.innerHTML = '<div>No data for this bot yet.</div>';
+        return;
+      }
+      connectedEl.textContent = s.connected ? 'yes' : 'no';
+      usernameEl.textContent = s.username || '-';
+      positionEl.textContent = s.position ? `${s.position.x}, ${s.position.y}, ${s.position.z}` : '-';
+      healthEl.textContent = `${s.health || 0}/${s.maxHealth || 20}`;
+      foodEl.textContent = s.food || 0;
+      controllerEl.textContent = s.controllingClientId ? 'someone' : 'none';
+      document.getElementById('viewerPort').textContent = s.viewerPort || '-';
+
+      // update viewer iframe if not set or changed
+      if (s.viewerPort) {
+        const src = `http://localhost:${s.viewerPort}/`;
+        if (viewerIframe.src !== src) {
+          viewerIframe.src = src;
+        }
+      }
+
+      // chat
+      if (s.chat && s.chat.length) {
+        chatLog.innerHTML = s.chat.slice(-200).map(l => `<div>${escapeHtml(l)}</div>`).join('');
+        chatLog.scrollTop = chatLog.scrollHeight;
+      }
+    });
+
+    document.getElementById('takeControl').addEventListener('click', () => {
+      socket.emit('takeControl', { botId });
+      hasControl = true;
+      alert('Requested control. Use the control area and WASD/Space/Shift to send movement. Click release when done.');
+    });
+    document.getElementById('releaseControl').addEventListener('click', () => {
+      socket.emit('releaseControl', { botId });
+      hasControl = false;
+      alert('Released control.');
+    });
+
+    document.getElementById('dropBtn').addEventListener('click', () => {
+      socket.emit('forceDrop', { botId });
+    });
+
+    document.getElementById('sendChat').addEventListener('click', () => {
+      const msg = document.getElementById('chatInput').value;
+      if (msg && msg.trim()) {
+        socket.emit('chat', { botId, msg: msg.trim() });
+        document.getElementById('chatInput').value = '';
+      }
+    });
+
+    // Control area handling
+    const controlArea = document.getElementById('controlArea');
+    const state = { forward:false, back:false, left:false, right:false, jump:false, sneak:false };
+
+    controlArea.addEventListener('keydown', (ev) => {
+      if (!hasControl) return;
+      const key = ev.key.toLowerCase();
+      if (key === 'w') sendControl('forward', true);
+      if (key === 's') sendControl('back', true);
+      if (key === 'a') sendControl('left', true);
+      if (key === 'd') sendControl('right', true);
+      if (ev.code === 'Space') sendControl('jump', true);
+      if (ev.shiftKey) sendControl('sneak', true);
+    });
+
+    controlArea.addEventListener('keyup', (ev) => {
+      if (!hasControl) return;
+      const key = ev.key.toLowerCase();
+      if (key === 'w') sendControl('forward', false);
+      if (key === 's') sendControl('back', false);
+      if (key === 'a') sendControl('left', false);
+      if (key === 'd') sendControl('right', false);
+      if (ev.code === 'Space') sendControl('jump', false);
+      if (!ev.shiftKey) sendControl('sneak', false);
+    });
+
+    // Basic mouse-look: capture mouse movement for pitch/yaw. (Requires click/focus)
+    let yaw = 0, pitch = 0;
+    controlArea.addEventListener('mousemove', (ev) => {
+      if (!hasControl) return;
+      const sensitivity = 0.002;
+      yaw -= ev.movementX * sensitivity;
+      pitch -= ev.movementY * sensitivity;
+      if (pitch > Math.PI/2) pitch = Math.PI/2;
+      if (pitch < -Math.PI/2) pitch = -Math.PI/2;
+      socket.emit('control', { botId, data: { type:'look', yaw, pitch } });
+    });
+
+    function sendControl(key, value) {
+      socket.emit('control', { botId, data: { type:'move', key, value } });
+    }
+
+    function escapeHtml(unsafe) {
+      return unsafe.replace(/[&<"']/g, function(m) {
+        return ({ '&':'&amp;','<':'&lt;','"':'&quot;',"'":'&#039;' }[m]);
+      });
+    }
+
+    controlArea.addEventListener('click', () => controlArea.focus());
+  </script>
+</body>
+</html>
