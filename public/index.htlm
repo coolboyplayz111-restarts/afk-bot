@@ -1,0 +1,89 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Bot Maker</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 40px; }
+    label { display:block; margin-top:8px; }
+    input { width: 320px; padding:6px; }
+    button { margin-top:12px; padding:8px 12px; }
+    .note { margin-top: 12px; color: #666 }
+    .bot-list { margin-top:18px; }
+    .bot-item { border:1px solid #ddd; padding:8px; margin-bottom:8px; }
+  </style>
+</head>
+<body>
+  <h2>Create / Start Bot</h2>
+  <form id="createForm">
+    <label>Server Host
+      <input id="host" value="Stackables.aternos.me" />
+    </label>
+    <label>Port
+      <input id="port" value="39639" />
+    </label>
+    <label>Username
+      <input id="username" placeholder="e.g. KeeperBot" />
+    </label>
+    <button type="submit">Create / Start Bot</button>
+  </form>
+
+  <div class="bot-list" id="botList">
+    <h3>Known Bots</h3>
+    <div id="botsContainer">Loading...</div>
+  </div>
+
+  <p class="note">No navbars, no sign-ins. The bot will try to join the specified server and will re-attempt connection every 15 seconds.</p>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io('/dashboard');
+    const botsContainer = document.getElementById('botsContainer');
+
+    document.getElementById('createForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const host = document.getElementById('host').value.trim();
+      const port = parseInt(document.getElementById('port').value, 10) || 25565;
+      const username = document.getElementById('username').value.trim() || `keeper_${Date.now()}`;
+      socket.emit('createBot', { host, port, username });
+      alert('Create request sent. New bot will appear in the list shortly.');
+    });
+
+    socket.on('allStates', (states) => {
+      renderBots(states);
+    });
+
+    socket.on('created', ({ id }) => {
+      console.log('Created', id);
+    });
+
+    function renderBots(states) {
+      const ids = Object.keys(states);
+      if (ids.length === 0) {
+        botsContainer.innerHTML = '<div>No bots yet</div>';
+        return;
+      }
+      botsContainer.innerHTML = ids.map(id => {
+        const s = states[id];
+        return `<div class="bot-item">
+          <div><strong>${id}</strong></div>
+          <div>Username: ${escapeHtml(s.username || '')}</div>
+          <div>Server: ${escapeHtml(s.host)}:${escapeHtml(s.port)}</div>
+          <div>Connected: ${s.connected ? 'yes' : 'no'}</div>
+          <div style="margin-top:6px;">
+            <a href="/dashboard.html?botId=${encodeURIComponent(id)}" target="_blank">Open Dashboard</a>
+            &nbsp;|&nbsp;
+            <a href="http://localhost:${s.viewerPort}/" target="_blank">Open Viewer (port ${s.viewerPort})</a>
+          </div>
+        </div>`;
+      }).join('');
+    }
+
+    function escapeHtml(unsafe) {
+      return unsafe ? unsafe.replace(/[&<"']/g, function(m) {
+        return ({ '&':'&amp;','<':'&lt;','"':'&quot;',"'":'&#039;' }[m]);
+      }) : '';
+    }
+  </script>
+</body>
+</html>
