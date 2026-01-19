@@ -1,10 +1,18 @@
+/**
+ * minecraft-multi-bot-keeper (viewer-optional)
+ * Updated: tries to start prismarine-viewer only when available and not disabled via DISABLE_VIEWER env var.
+ *
+ * Notes:
+ * - Set DISABLE_VIEWER=true in Render to avoid attempting to load prismarine-viewer/canvas.
+ * - Uses process.env.PORT || 3000 so Render's PORT env is honored.
+ */
+
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const mineflayer = require('mineflayer');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const { GoalNear } = goals;
-const viewer = require('prismarine-viewer').mineflayer;
 const mcDataPkg = require('minecraft-data');
 
 const app = express();
@@ -14,12 +22,13 @@ const io = socketIo(server);
 app.use(express.json());
 app.use(express.static('public'));
 
-const VIEWER_PORT_BASE = 3001; // per-bot viewers will use increasing ports
+// Config
+const VIEWER_PORT_BASE = 3001; // per-bot viewers will use increasing ports if available
 const RECONNECT_INTERVAL_MS = 15000; // 15 seconds
 
-// botManager holds multiple bots keyed by id
+// State container for multiple bots
 const botManager = {
-  bots: {}, // id -> { bot, state, viewerPort, aiEnabled, intervals: {reconnect, ai}, ... }
+  bots: {}, // id -> { bot, state, aiEnabled, aiIntervals, reconnectInterval }
   nextViewerPort: VIEWER_PORT_BASE
 };
 
@@ -27,17 +36,38 @@ function makeId() {
   return `bot_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 }
 
-function createBot({ host, port, username, id } = {}) {
-  id = id || makeId();
-  host = host || 'Stackables.aternos.me';
-  port = port || 39639;
-  username = username || `${id}`;
-
-  // If already exists, try to remove old
-  if (botManager.bots[id] && botManager.bots[id].bot) {
-    try { botManager.bots[id].bot.quit(); } catch (e) {}
+// Helper to attempt to start prismarine-viewer for a bot if available
+function tryStartViewerForBot(entry) {
+  if (!entry || !entry.bot) return;
+  // Respect explicit disable via env
+  if (String(process.env.DISABLE_VIEWER || '').toLowerCase() === 'true') {
+    console.log(`[${entry.state.id}] viewer disabled via DISABLE_VIEWER`);
+    return;
   }
 
+  // Lazy require and guard against missing native deps (canvas)
+  try {
+    // require('canvas') first to surface missing-native error if absent
+    try { require('canvas'); } catch (cErr) {
+      // node-canvas not present — skip viewer
+      console.warn(`[${entry.state.id}] node-canvas not available, skipping prismarine-viewer: ${cErr && cErr.message}`);
+      return;
+    }
+
+    const viewer = require('prismarine-viewer').mineflayer;
+    viewer(entry.bot, { port: entry.state.viewerPort, firstPerson: true });
+    console.log(`[${entry.state.id}] prismarine-viewer started at port ${entry.state.viewerPort}`);
+  } catch (err) {
+    console.warn(`[${entry.state.id}] prismarine-viewer unavailable or failed to start: ${err && err.message}`);
+  }
+}
+
+// Create bot
+function createBot({ host = 'Stackables.aternos.me', port = 39639, username, id } = {}) {
+  id = id || makeId();
+  username = username || id;
+
+  // prepare state
   const viewerPort = botManager.nextViewerPort++;
   const state = {
     id,
@@ -54,7 +84,7 @@ function createBot({ host, port, username, id } = {}) {
     viewerPort
   };
 
-  const data = {
+  const entry = {
     bot: null,
     state,
     aiEnabled: true,
@@ -62,13 +92,13 @@ function createBot({ host, port, username, id } = {}) {
     aiIntervals: { randomMove: null, avoidCheck: null, trySleep: null }
   };
 
-  botManager.bots[id] = data;
+  botManager.bots[id] = entry;
 
-  // start immediate connection attempt
+  // attempt initial connection
   attemptCreateBot(id);
 
-  // start reconnect interval to ensure rejoin attempts every 15s when disconnected
-  data.reconnectInterval = setInterval(() => {
+  // ensure reconnect attempts continue
+  entry.reconnectInterval = setInterval(() => {
     const cur = botManager.bots[id];
     if (!cur) return;
     if (!cur.bot || !cur.state.connected) {
@@ -96,16 +126,9 @@ function attemptCreateBot(id) {
       entry.state.connected = true;
       entry.state.username = bot.username;
       entry.aiEnabled = true;
-
-      // start viewer on dedicated port
-      try {
-        viewer(bot, { port: entry.state.viewerPort, firstPerson: true });
-        console.log(`[${id}] prismarine-viewer started at http://localhost:${entry.state.viewerPort}/`);
-      } catch (e) {
-        console.warn(`[${id}] viewer start failed:`, e.message);
-      }
-
       startAIActions(id);
+      // Try to start viewer (safe: won't crash if canvas missing)
+      tryStartViewerForBot(entry);
       emitAllStates();
     });
 
@@ -137,7 +160,7 @@ function attemptCreateBot(id) {
       emitAllStates();
     });
   } catch (err) {
-    console.error(`[${id}] createBot error:`, err.message);
+    console.error(`[${id}] createBot error:`, err && err.message);
   }
 }
 
@@ -175,17 +198,13 @@ function setupBotEvents(id) {
     }
   });
 
-  // improved hostile detection: whenever entities change, check proximity and run
-  bot.on('entityMoved', (entity) => {
+  bot.on('entityMoved', () => {
     if (!entry.aiEnabled) return;
     checkAndAvoidHostiles(id);
   });
   bot.on('entitySpawn', () => {
     if (!entry.aiEnabled) return;
     checkAndAvoidHostiles(id);
-  });
-  bot.on('entityGone', () => {
-    // nothing special
   });
 }
 
@@ -198,11 +217,7 @@ async function dropEverything(id) {
   try {
     const items = bot.inventory.items();
     for (const item of items) {
-      try {
-        await bot.tossStack(item);
-      } catch (e) {
-        console.warn(`[${id}] tossStack failed for ${item.name}:`, e && e.message);
-      }
+      try { await bot.tossStack(item); } catch (e) { /* ignore */ }
     }
     console.log(`[${id}] dropped all items`);
   } finally {
@@ -216,20 +231,17 @@ function startAIActions(id) {
   if (!entry || !entry.bot) return;
   stopAIActions(id);
 
-  // random movement every few seconds
   entry.aiIntervals.randomMove = setInterval(() => {
     if (!entry.aiEnabled || !entry.bot || !entry.bot.pathfinder) return;
     if (entry.bot.pathfinder.isMoving()) return;
     randomMove(id);
   }, 3500 + Math.random() * 3000);
 
-  // periodic hostile check (in addition to reactive events)
   entry.aiIntervals.avoidCheck = setInterval(() => {
     if (!entry.aiEnabled) return;
     checkAndAvoidHostiles(id);
   }, 1500);
 
-  // try to sleep at night periodically
   entry.aiIntervals.trySleep = setInterval(() => {
     if (!entry.aiEnabled) return;
     trySleepIfNight(id);
@@ -239,8 +251,8 @@ function startAIActions(id) {
 function stopAIActions(id) {
   const entry = botManager.bots[id];
   if (!entry) return;
-  for (const key of Object.keys(entry.aiIntervals)) {
-    if (entry.aiIntervals[key]) { clearInterval(entry.aiIntervals[key]); entry.aiIntervals[key] = null; }
+  for (const k of Object.keys(entry.aiIntervals)) {
+    if (entry.aiIntervals[k]) { clearInterval(entry.aiIntervals[k]); entry.aiIntervals[k] = null; }
   }
 }
 
@@ -267,11 +279,7 @@ async function trySleepIfNight(id) {
   const t = bot.time && bot.time.timeOfDay;
   if (!t) return;
   if (t >= 12500 && t <= 23500) {
-    // find bed near
-    const bed = bot.findBlock({
-      matching: (b) => b && b.name && b.name.includes('bed'),
-      maxDistance: 20
-    });
+    const bed = bot.findBlock({ matching: (b) => b && b.name && b.name.includes('bed'), maxDistance: 20 });
     if (bed) {
       try {
         const mcData = mcDataPkg(bot.version);
@@ -280,17 +288,12 @@ async function trySleepIfNight(id) {
         await bot.pathfinder.goto(new GoalNear(bed.position.x, bed.position.y, bed.position.z, 1));
         await bot.sleep(bed.position);
         console.log(`[${id}] slept in a bed`);
-      } catch (e) {
-        // ignore
-      }
+      } catch (e) {}
     }
   }
 }
 
-// Improved mob avoidance:
-// - find hostiles near bot
-// - sample candidate safe points in a ring around bot (further from hostiles)
-// - try to path to first feasible candidate using pathfinder (GoalNear)
+// Improved mob avoidance (same approach as before)
 function checkAndAvoidHostiles(id) {
   const entry = botManager.bots[id];
   if (!entry || !entry.bot || !entry.bot.entity) return;
@@ -298,27 +301,12 @@ function checkAndAvoidHostiles(id) {
   const pos = bot.entity.position;
   const entities = Object.values(bot.entities);
 
-  // detect hostiles by name and by mob type
-  const hostileSet = new Set(['zombie', 'skeleton', 'creeper', 'spider', 'husk', 'drowned', 'witch', 'zombified_piglin', 'pillager', 'vindication_illager', 'evoker']);
-  const hostiles = entities.filter(e => {
-    if (!e || !e.name || !e.position) return false;
-    const name = (e.name || '').toLowerCase();
-    if (hostileSet.has(name)) {
-      try {
-        return pos.distanceTo(e.position) < 12;
-      } catch (err) {
-        return false;
-      }
-    }
-    return false;
-  });
+  const hostileSet = new Set(['zombie','skeleton','creeper','spider','husk','drowned','witch','zombified_piglin','pillager','evoker','vindication_illager']);
+  const hostiles = entities.filter(e => e && e.name && e.position && hostileSet.has((e.name||'').toLowerCase()) && pos.distanceTo(e.position) < 12);
+  if (!hostiles.length) return;
 
-  if (!hostiles || hostiles.length === 0) return;
-
-  // compute a safe spot away from the closest hostile
-  // sample directions and select that maximizes min distance to hostiles
   const sampleCount = 12;
-  const minDistance = 10; // desired distance from any hostile
+  const minDistance = 10;
   const radiusMin = 6;
   const radiusMax = 14;
 
@@ -328,16 +316,11 @@ function checkAndAvoidHostiles(id) {
     const dist = radiusMin + Math.random() * (radiusMax - radiusMin);
     const cx = pos.x + Math.cos(angle) * dist;
     const cz = pos.z + Math.sin(angle) * dist;
-    // find nearest ground Y at that x,z by sampling same y downwards a few blocks
     let cy = Math.floor(pos.y);
     for (let yOff = 0; yOff > -6; yOff--) {
       const block = bot.blockAt({ x: Math.floor(cx), y: cy + yOff - 1, z: Math.floor(cz) });
-      if (block && block.boundingBox === 'block') {
-        cy = cy + yOff;
-        break;
-      }
+      if (block && block.boundingBox === 'block') { cy = cy + yOff; break; }
     }
-    // compute min distance to hostiles for candidate
     let minD = Infinity;
     for (const h of hostiles) {
       if (!h.position) continue;
@@ -347,10 +330,7 @@ function checkAndAvoidHostiles(id) {
     candidates.push({ x: cx, y: cy, z: cz, minD });
   }
 
-  // sort candidates by descending minD (prefer ones far from hostiles)
-  candidates.sort((a, b) => b.minD - a.minD);
-
-  // choose first candidate that seems sufficiently safe (minD >= minDistance) or best available
+  candidates.sort((a,b) => b.minD - a.minD);
   const chosen = candidates.find(c => c.minD >= minDistance) || candidates[0];
   if (!chosen) return;
 
@@ -361,7 +341,7 @@ function checkAndAvoidHostiles(id) {
     bot.pathfinder.setGoal(new GoalNear(chosen.x, chosen.y, chosen.z, 1));
     console.log(`[${id}] running away to (${chosen.x.toFixed(1)},${chosen.y.toFixed(1)},${chosen.z.toFixed(1)}) from hostiles`);
   } catch (e) {
-    // fallback: try to run opposite vector from the nearest hostile
+    // fallback: run opposite vector from nearest hostile
     const nearest = hostiles[0];
     if (nearest && nearest.position) {
       const dx = pos.x - nearest.position.x;
@@ -379,10 +359,9 @@ function checkAndAvoidHostiles(id) {
   }
 }
 
-// Websocket and HTTP serving
+// Websocket namespace for UI -> bot control
 io.of('/dashboard').on('connection', (socket) => {
   console.log('Dashboard client connected:', socket.id);
-  // send initial full state
   socket.emit('allStates', gatherStates());
 
   socket.on('createBot', ({ host, port, username }) => {
@@ -415,14 +394,8 @@ io.of('/dashboard').on('connection', (socket) => {
     if (!entry || !entry.bot) return;
     if (entry.state.controllingClientId !== socket.id) return;
     const bot = entry.bot;
-    if (data.type === 'move') {
-      bot.setControlState(data.key, data.value);
-    } else if (data.type === 'look') {
-      try {
-        const { yaw, pitch } = data;
-        bot.look(yaw, pitch, true);
-      } catch (e) {}
-    }
+    if (data.type === 'move') bot.setControlState(data.key, data.value);
+    else if (data.type === 'look') { try { bot.look(data.yaw, data.pitch, true); } catch (e) {} }
   });
 
   socket.on('chat', ({ botId, msg }) => {
@@ -438,12 +411,7 @@ io.of('/dashboard').on('connection', (socket) => {
     dropEverything(botId);
   });
 
-  socket.on('openDashboard', ({ botId }) => {
-    // no-op; client will open /dashboard.html?botId=...
-  });
-
   socket.on('disconnect', () => {
-    // if a client disconnected while controlling any bots, release control
     for (const id of Object.keys(botManager.bots)) {
       const entry = botManager.bots[id];
       if (entry.state.controllingClientId === socket.id) {
@@ -458,35 +426,26 @@ io.of('/dashboard').on('connection', (socket) => {
 
 function gatherStates() {
   const out = {};
-  for (const id of Object.keys(botManager.bots)) {
-    out[id] = botManager.bots[id].state;
-  }
+  for (const id of Object.keys(botManager.bots)) out[id] = botManager.bots[id].state;
   return out;
 }
+function emitAllStates() { io.of('/dashboard').emit('allStates', gatherStates()); }
 
-function emitAllStates() {
-  io.of('/dashboard').emit('allStates', gatherStates());
-}
+// Simple HTTP routes
+app.get('/', (req,res) => res.sendFile(__dirname + '/public/index.html'));
+app.get('/dashboard.html', (req,res) => res.sendFile(__dirname + '/public/dashboard.html'));
+app.get('/health', (req,res) => res.send('ok'));
 
-// Expose simple HTTP endpoints for convenience
-app.get('/', (req, res) => {
-  res.sendFile(__dirname + '/public/index.html');
-});
-app.get('/dashboard.html', (req, res) => {
-  res.sendFile(__dirname + '/public/dashboard.html');
-});
-
-// Replace the existing PORT constant (e.g. const PORT = 3000;)
+// Use Render's PORT env if present
 const PORT = process.env.PORT || 3000;
-
 server.listen(PORT, () => {
-  console.log(`Web server listening on http://localhost:${PORT}`);
-  console.log(`Open / (bot maker) and /dashboard.html`);
+  console.log(`Web server listening on port ${PORT}`);
 });
-// Optionally create an initial bot per original request
+
+// Optionally create an initial bot
 createBot({ host: 'Stackables.aternos.me', port: 39639, username: `keeper_${Date.now()}` });
 
-// Periodic telemetry update emitter
+// Telemetry updater
 setInterval(() => {
   for (const id of Object.keys(botManager.bots)) {
     const entry = botManager.bots[id];
