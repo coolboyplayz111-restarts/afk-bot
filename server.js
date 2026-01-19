@@ -1,4 +1,4 @@
-// server.js - Docker-friendly with viewer proxying (use as-is)
+// server.js - Docker-friendly with viewer proxying
 const express = require('express');
 const http = require('http');
 const { createProxyMiddleware } = require('http-proxy-middleware');
@@ -20,7 +20,9 @@ const RECONNECT_INTERVAL_MS = 15000;
 
 const botManager = { bots: {}, nextViewerPort: VIEWER_PORT_BASE };
 
-function makeId() { return `bot_${Date.now()}_${Math.floor(Math.random() * 10000)}`; }
+function makeId() {
+  return `bot_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+}
 
 function tryStartViewerForBot(entry) {
   if (!entry || !entry.bot) return;
@@ -74,7 +76,12 @@ function createBot({ host = 'Stackables.aternos.me', port = 39639, username, id 
   id = id || makeId();
   username = username || id;
   const viewerPort = botManager.nextViewerPort++;
-  const state = { id, connected: false, username, host, port, health: 0, maxHealth: 20, food: 20, position: { x:0,y:0,z:0 }, chat: [], controllingClientId: null, viewerPort };
+  const state = {
+    id, connected: false, username, host, port,
+    health: 0, maxHealth: 20, food: 20,
+    position: { x: 0, y: 0, z: 0 },
+    chat: [], controllingClientId: null, viewerPort
+  };
   const entry = { bot: null, state, aiEnabled: true, reconnectInterval: null, aiIntervals: {} };
   botManager.bots[id] = entry;
 
@@ -170,57 +177,116 @@ function startAIActions(id) {
 
   entry.aiIntervals.randomMove = setInterval(() => { if (!entry.aiEnabled || !entry.bot || !entry.bot.pathfinder) return; if (entry.bot.pathfinder.isMoving()) return; randomMove(id); }, 3500 + Math.random()*3000);
   entry.aiIntervals.avoidCheck = setInterval(() => { if (!entry.aiEnabled) return; checkAndAvoidHostiles(id); }, 1500);
-  entry.aiIntervals.trySleep = setInterval(()=>{ if (!entry.aiEnabled) return; trySleepIfNight(id); }, 10000);
+  entry.aiIntervals.trySleep = setInterval(() => { if (!entry.aiEnabled) return; trySleepIfNight(id); }, 10000);
 }
 
-function stopAIActions(id) { const entry = botManager.bots[id]; if (!entry) return; for (const k of Object.keys(entry.aiIntervals)) { if (entry.aiIntervals[k]) { clearInterval(entry.aiIntervals[k]); entry.aiIntervals[k] = null; } } }
+function stopAIActions(id) {
+  const entry = botManager.bots[id];
+  if (!entry) return;
+  for (const k of Object.keys(entry.aiIntervals)) {
+    if (entry.aiIntervals[k]) { clearInterval(entry.aiIntervals[k]); entry.aiIntervals[k] = null; }
+  }
+}
 
 function randomMove(id) {
-  const entry = botManager.bots[id]; if (!entry || !entry.bot || !entry.bot.entity) return;
-  const bot = entry.bot; const current = bot.entity.position;
-  const rx = current.x + (Math.random()-0.5)*8; const rz = current.z + (Math.random()-0.5)*8; const ry = current.y;
-  try { const mcData = mcDataPkg(bot.version); const movements = new Movements(bot, mcData); bot.pathfinder.setMovements(movements); bot.pathfinder.setGoal(new GoalNear(rx, ry, rz, 1)); } catch(e) {}
+  const entry = botManager.bots[id];
+  if (!entry || !entry.bot || !entry.bot.entity) return;
+  const bot = entry.bot;
+  const current = bot.entity.position;
+  const rx = current.x + (Math.random() - 0.5) * 8;
+  const rz = current.z + (Math.random() - 0.5) * 8;
+  const ry = current.y;
+  try {
+    const mcData = mcDataPkg(bot.version);
+    const movements = new Movements(bot, mcData);
+    bot.pathfinder.setMovements(movements);
+    bot.pathfinder.setGoal(new GoalNear(rx, ry, rz, 1));
+  } catch (e) {}
 }
 
 async function trySleepIfNight(id) {
-  const entry = botManager.bots[id]; if (!entry || !entry.bot || !entry.bot.time) return;
-  const bot = entry.bot; const t = bot.time && bot.time.timeOfDay; if (!t) return;
+  const entry = botManager.bots[id];
+  if (!entry || !entry.bot || !entry.bot.time) return;
+  const bot = entry.bot;
+  const t = bot.time && bot.time.timeOfDay;
+  if (!t) return;
   if (t >= 12500 && t <= 23500) {
     const bed = bot.findBlock({ matching: (b) => b && b.name && b.name.includes('bed'), maxDistance: 20 });
     if (bed) {
-      try { const mcData = mcDataPkg(bot.version); const movements = new Movements(bot, mcData); bot.pathfinder.setMovements(movements); await bot.pathfinder.goto(new GoalNear(bed.position.x, bed.position.y, bed.position.z, 1)); await bot.sleep(bed.position); } catch(e) {}
+      try {
+        const mcData = mcDataPkg(bot.version);
+        const movements = new Movements(bot, mcData);
+        bot.pathfinder.setMovements(movements);
+        await bot.pathfinder.goto(new GoalNear(bed.position.x, bed.position.y, bed.position.z, 1));
+        await bot.sleep(bed.position);
+        console.log(`[${id}] slept in bed`);
+      } catch (e) {}
     }
   }
 }
 
 function checkAndAvoidHostiles(id) {
-  const entry = botManager.bots[id]; if (!entry || !entry.bot || !entry.bot.entity) return;
-  const bot = entry.bot; const pos = bot.entity.position; const entities = Object.values(bot.entities);
+  const entry = botManager.bots[id];
+  if (!entry || !entry.bot || !entry.bot.entity) return;
+  const bot = entry.bot;
+  const pos = bot.entity.position;
+  const entities = Object.values(bot.entities);
+
   const hostileSet = new Set(['zombie','skeleton','creeper','spider','husk','drowned','witch','zombified_piglin','pillager','evoker','vindication_illager']);
   const hostiles = entities.filter(e => e && e.name && e.position && hostileSet.has((e.name||'').toLowerCase()) && pos.distanceTo(e.position) < 12);
   if (!hostiles.length) return;
 
-  const sampleCount = 12; const minDistance = 10; const radiusMin = 6; const radiusMax = 14; let candidates = [];
+  const sampleCount = 12;
+  const minDistance = 10;
+  const radiusMin = 6;
+  const radiusMax = 14;
+  let candidates = [];
   for (let i = 0; i < sampleCount; i++) {
-    const angle = (i/sampleCount)*Math.PI*2; const dist = radiusMin + Math.random()*(radiusMax-radiusMin);
-    const cx = pos.x + Math.cos(angle)*dist; const cz = pos.z + Math.sin(angle)*dist;
+    const angle = (i / sampleCount) * Math.PI * 2;
+    const dist = radiusMin + Math.random() * (radiusMax - radiusMin);
+    const cx = pos.x + Math.cos(angle) * dist;
+    const cz = pos.z + Math.sin(angle) * dist;
     let cy = Math.floor(pos.y);
-    for (let yOff=0;yOff>-6;yOff--) { const block = bot.blockAt({ x: Math.floor(cx), y: cy + yOff -1, z: Math.floor(cz) }); if (block && block.boundingBox === 'block') { cy = cy + yOff; break; } }
-    let minD = Infinity; for (const h of hostiles) { if (!h.position) continue; const d = Math.sqrt((cx-h.position.x)**2 + (cz-h.position.z)**2); if (d < minD) minD = d; }
+    for (let yOff = 0; yOff > -6; yOff--) {
+      const block = bot.blockAt({ x: Math.floor(cx), y: cy + yOff - 1, z: Math.floor(cz) });
+      if (block && block.boundingBox === 'block') { cy = cy + yOff; break; }
+    }
+    let minD = Infinity;
+    for (const h of hostiles) {
+      if (!h.position) continue;
+      const d = Math.sqrt((cx - h.position.x) ** 2 + (cz - h.position.z) ** 2);
+      if (d < minD) minD = d;
+    }
     candidates.push({ x: cx, y: cy, z: cz, minD });
   }
-
-  candidates.sort((a,b) => b.minD - a.minD);
+  candidates.sort((a, b) => b.minD - a.minD);
   const chosen = candidates.find(c => c.minD >= minDistance) || candidates[0];
   if (!chosen) return;
-  try { const mcData = mcDataPkg(bot.version); const movements = new Movements(bot, mcData); bot.pathfinder.setMovements(movements); bot.pathfinder.setGoal(new GoalNear(chosen.x, chosen.y, chosen.z, 1)); } catch(e) {
-    const nearest = hostiles[0]; if (nearest && nearest.position) { const dx = pos.x - nearest.position.x; const dz = pos.z - nearest.position.z; const len = Math.sqrt(dx*dx + dz*dz) || 1; const targetX = pos.x + (dx/len)*10; const targetZ = pos.z + (dz/len)*10;
-      try { const mcData = mcDataPkg(bot.version); const movements = new Movements(bot, mcData); bot.pathfinder.setMovements(movements); bot.pathfinder.setGoal(new GoalNear(targetX, pos.y, targetZ, 1)); } catch(e2) {}
+  try {
+    const mcData = mcDataPkg(bot.version);
+    const movements = new Movements(bot, mcData);
+    bot.pathfinder.setMovements(movements);
+    bot.pathfinder.setGoal(new GoalNear(chosen.x, chosen.y, chosen.z, 1));
+    console.log(`[${id}] running away to (${chosen.x.toFixed(1)},${chosen.y.toFixed(1)},${chosen.z.toFixed(1)})`);
+  } catch (e) {
+    const nearest = hostiles[0];
+    if (nearest && nearest.position) {
+      const dx = pos.x - nearest.position.x;
+      const dz = pos.z - nearest.position.z;
+      const len = Math.sqrt(dx * dx + dz * dz) || 1;
+      const targetX = pos.x + (dx / len) * 10;
+      const targetZ = pos.z + (dz / len) * 10;
+      try {
+        const mcData = mcDataPkg(bot.version);
+        const movements = new Movements(bot, mcData);
+        bot.pathfinder.setMovements(movements);
+        bot.pathfinder.setGoal(new GoalNear(targetX, pos.y, targetZ, 1));
+      } catch (e2) {}
     }
   }
 }
 
-// socket.io namespace
+// socket.io UI
 io.of('/dashboard').on('connection', (socket) => {
   socket.emit('allStates', gatherStates());
   socket.on('createBot', ({ host, port, username }) => { const id = createBot({ host, port, username }); socket.emit('created', { id }); });
